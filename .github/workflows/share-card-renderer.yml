@@ -1,0 +1,44 @@
+name: share-card-renderer
+
+# T5.4bis — drains share_card_jobs and renders the before/after visual with
+# headless Chromium (the render doesn't fit a Supabase Edge Function).
+#
+# Triggered by repository_dispatch from the DB (pg_cron function
+# dispatch_share_card_render pings the GitHub API when the queue has work),
+# plus a manual button and a low-frequency safety-net schedule.
+
+on:
+  repository_dispatch:
+    types: [render-share-cards]
+  workflow_dispatch:
+  schedule:
+    # backstop only — the repository_dispatch above is the real trigger
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: share-card-renderer
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: share-card-renderer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 22+ : @supabase/supabase-js exige un WebSocket natif (absent en Node 20)
+          node-version: 22
+          cache: npm
+          cache-dependency-path: share-card-renderer/package-lock.json
+      - run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Drain the queue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run drain

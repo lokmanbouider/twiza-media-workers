@@ -1,0 +1,23 @@
+{
+  "name": "@twiza/share-image-backfill",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Drains claim_share_image_jobs: resizes each 'before' report photo's already-uploaded full-resolution image down to an 880px share image (photos.share_path), the /r/<id> and live /a/<id> hero image. Runs on a GitHub Actions runner, not a Supabase Edge Function — decoding an image on a cold Edge worker has twice blown its CPU budget on this project (magick-wasm, Satori).",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "drain": "tsx src/drain.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "sharp": "^0.33.5",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

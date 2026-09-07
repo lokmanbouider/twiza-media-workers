@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  share-card-renderer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: share-card-renderer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 22+ : @supabase/supabase-js exige un WebSocket natif (absent en Node 20)
+          node-version: 22
+          cache: npm
+          cache-dependency-path: share-card-renderer/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  share-image-backfill:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: share-image-backfill
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: share-image-backfill/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
