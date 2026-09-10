@@ -1,0 +1,23 @@
+{
+  "name": "@twiza/photo-embed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Drains claim_photo_embed_jobs: computes a CLIP ViT-B/32 image embedding (512-d, L2-normalised) for every 'before' report photo missing one (photos.embedding) and records it (complete_photo_embed_job). Feeds near-duplicate detection and 'similar reports' for moderation. Runs on a GitHub Actions runner, not a Supabase Edge Function — running a model on a cold Edge worker would blow its ~2s CPU budget, same class of problem as magick-wasm / Satori on this project.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "drain": "tsx src/drain.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

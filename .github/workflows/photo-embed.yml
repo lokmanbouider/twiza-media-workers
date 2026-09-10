@@ -1,0 +1,52 @@
+name: photo-embed
+
+# Computes a CLIP ViT-B/32 image embedding (512-d) for every 'before' report
+# photo missing one (photos.embedding). Feeds near-duplicate detection and
+# 'similar reports' for moderation. No urgency: a missing embedding just means
+# dedup falls back to the exact SHA-256 check.
+#
+# Real trigger: repository_dispatch (embed-photos) fired by the DB
+# (pg_cron -> public.dispatch_photo_embeddings) only when a photo is actually
+# waiting, so no Actions minutes are burned idle. The daily schedule is a
+# backstop in case a dispatch is ever missed.
+
+on:
+  repository_dispatch:
+    types: [embed-photos]
+  workflow_dispatch:
+  schedule:
+    # backstop only — the repository_dispatch above is the real trigger
+    - cron: "23 3 * * *"
+
+concurrency:
+  group: photo-embed
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: photo-embed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 22+ : @supabase/supabase-js exige un WebSocket natif (absent en Node 20)
+          node-version: 22
+          cache: npm
+          cache-dependency-path: photo-embed/package-lock.json
+      - run: npm ci
+      # Poids CLIP q8 (~90 Mo) téléchargés depuis le HF Hub au 1er run puis
+      # servis depuis le cache — régime permanent sans téléchargement.
+      - name: Cache the CLIP model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-Xenova-clip-vit-base-patch32-q8
+      - name: Drain the queue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npm run drain
