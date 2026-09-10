@@ -16,6 +16,7 @@ la logique de file (`share_card_jobs`, `claim_share_image_jobs`,
 |---|---|---|
 | `share-card-renderer/` | Rend le visuel de partage avant/après en 3 formats via Chromium headless (`playwright`) + `sharp`. | `repository_dispatch: render-share-cards` (pg_cron `dispatch_share_card_render` quand `share_card_jobs` a du travail) + backstop `17 */6 * * *`. |
 | `share-image-backfill/` | Réduit chaque photo « before » pleine résolution à 880 px (`sharp`) et la re-téléverse sous `share/`. | `repository_dispatch: drain-share-images` (pg_cron `dispatch_share_image_backfill` quand une photo attend) + backstop `41 4 * * *`. |
+| `photo-embed/` | Calcule un embedding CLIP ViT-B/32 (512-d, q8) de chaque photo « before » et l'enregistre (`photos.embedding`). Sert la dédup *near-duplicate* et les « signalements similaires » de la modération. | `repository_dispatch: embed-photos` (pg_cron `dispatch_photo_embeddings` quand une photo attend) + backstop `23 3 * * *`. |
 
 Pourquoi hors Edge Function : décoder / rasteriser une image sur un worker
 Edge Supabase froid dépasse le budget CPU ~2 s (rencontré 2× sur ce projet,

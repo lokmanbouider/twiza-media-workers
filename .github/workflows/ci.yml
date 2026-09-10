@@ -38,3 +38,19 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  photo-embed:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: photo-embed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: photo-embed/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
