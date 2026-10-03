@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeError,
   drainAll,
+  isRetryableUploadError,
   type RunResult,
   runOnce,
   type ServiceClientLike,
   sharePathFor,
+  type StorageErrorLike,
   type WorkerDeps,
 } from "./worker.js";
 
@@ -15,7 +18,10 @@ function fakeService(opts: {
   objects?: Record<string, number>;
   calls: Calls;
   uploads: { path: string; bytes: number }[];
+  /** One entry per upload() call, in order; missing/null = success. */
+  uploadErrors?: (StorageErrorLike | null)[];
 }): ServiceClientLike {
+  const uploadErrors = [...(opts.uploadErrors ?? [])];
   const jobQueue = [...(opts.jobs ?? [{ id: "p-1", storage_path: "abc123.jpg" }])];
   const objects = opts.objects ?? { "abc123.jpg": 240_000 };
   return {
@@ -31,7 +37,7 @@ function fakeService(opts: {
           },
           upload(path: string, body: Uint8Array) {
             opts.uploads.push({ path, bytes: body.byteLength });
-            return Promise.resolve({ data: null, error: null });
+            return Promise.resolve({ data: null, error: uploadErrors.shift() ?? null });
           },
         };
       },
@@ -49,6 +55,8 @@ function fakeService(opts: {
     },
   };
 }
+
+const noSleep = () => Promise.resolve();
 
 const fakeResize: WorkerDeps["resize"] = (bytes) =>
   Promise.resolve(new Uint8Array(Math.min(bytes.byteLength, 80_000)));
@@ -112,6 +120,156 @@ describe("runOnce", () => {
 
     const result = await runOnce(deps);
     expect((result as { error: string }).error).toBe("corrupt jpeg");
+  });
+});
+
+describe("describeError", () => {
+  it("never returns an empty string", () => {
+    expect(describeError(null)).toMatch(/no detail/);
+    expect(describeError({ message: "" })).toMatch(/no detail/);
+    expect(describeError({ message: "<none>" })).toMatch(/no detail/);
+  });
+
+  it("includes name, message, HTTP status and nested cause", () => {
+    const err = {
+      name: "StorageUnknownError",
+      message: "fetch failed",
+      status: 503,
+      originalError: { message: "ECONNRESET" },
+    };
+    expect(describeError(err)).toBe(
+      "StorageUnknownError — fetch failed — HTTP 503 — cause: ECONNRESET",
+    );
+  });
+
+  it("reads a string statusCode", () => {
+    expect(describeError({ message: "Payload too large", statusCode: "413" })).toBe(
+      "Payload too large — HTTP 413",
+    );
+  });
+});
+
+describe("isRetryableUploadError", () => {
+  it("retries network-level failures (no status) and 5xx/408/429", () => {
+    expect(isRetryableUploadError({ message: "<none>" })).toBe(true);
+    expect(isRetryableUploadError({ message: "x", status: 502 })).toBe(true);
+    expect(isRetryableUploadError({ message: "x", status: 408 })).toBe(true);
+    expect(isRetryableUploadError({ message: "x", statusCode: "429" })).toBe(true);
+  });
+
+  it("does not retry definitive 4xx answers", () => {
+    expect(isRetryableUploadError({ message: "x", status: 400 })).toBe(false);
+    expect(isRetryableUploadError({ message: "x", status: 403 })).toBe(false);
+    expect(isRetryableUploadError({ message: "x", statusCode: "413" })).toBe(false);
+  });
+});
+
+describe("runOnce — upload retries", () => {
+  it("succeeds when a transient upload failure clears on retry", async () => {
+    const calls: Calls = [];
+    const uploads: { path: string; bytes: number }[] = [];
+    const sleeps: number[] = [];
+    const deps: WorkerDeps = {
+      getServiceClient: () =>
+        fakeService({ calls, uploads, uploadErrors: [{ message: "<none>" }, null] }),
+      resize: fakeResize,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+    };
+
+    const result = await runOnce(deps);
+
+    expect(result).toEqual({ claimed: 1, id: "p-1", sharePath: "share/abc123.jpg" });
+    expect(uploads).toHaveLength(2);
+    expect(sleeps).toEqual([500]);
+    const complete = calls.find((c) => c.fn === "complete_share_image_job");
+    expect(complete?.params).toEqual({ p_id: "p-1", p_share_path: "share/abc123.jpg" });
+  });
+
+  it("backs off exponentially and records every attempt when all fail", async () => {
+    const calls: Calls = [];
+    const uploads: { path: string; bytes: number }[] = [];
+    const sleeps: number[] = [];
+    const deps: WorkerDeps = {
+      getServiceClient: () =>
+        fakeService({
+          calls,
+          uploads,
+          uploadErrors: [
+            { message: "<none>" },
+            { message: "bad gateway", status: 502 },
+            { message: "bad gateway", status: 502 },
+          ],
+        }),
+      resize: fakeResize,
+      sleep: (ms) => {
+        sleeps.push(ms);
+        return Promise.resolve();
+      },
+    };
+
+    const result = await runOnce(deps);
+
+    expect(uploads).toHaveLength(3);
+    expect(sleeps).toEqual([500, 1000]);
+    const error = (result as { error: string }).error;
+    expect(error).toMatch(/upload share\/abc123\.jpg failed after 3 attempt/);
+    expect(error).toMatch(/#1: "<none>" — no detail/);
+    expect(error).toMatch(/#3: bad gateway — HTTP 502/);
+    const complete = calls.find((c) => c.fn === "complete_share_image_job");
+    expect(complete?.params?.p_error).toMatch(/failed after 3 attempt/);
+    expect(complete?.params).not.toHaveProperty("p_share_path");
+  });
+
+  it("gives up immediately on a definitive 4xx", async () => {
+    const uploads: { path: string; bytes: number }[] = [];
+    const deps: WorkerDeps = {
+      getServiceClient: () =>
+        fakeService({
+          calls: [],
+          uploads,
+          uploadErrors: [{ message: "Payload too large", statusCode: "413" }],
+        }),
+      resize: fakeResize,
+      sleep: noSleep,
+    };
+
+    const result = await runOnce(deps);
+
+    expect(uploads).toHaveLength(1);
+    expect((result as { error: string }).error).toMatch(
+      /failed after 1 attempt.*Payload too large — HTTP 413/,
+    );
+  });
+
+  it("treats a thrown upload (fetch failure) like a returned error", async () => {
+    let calls = 0;
+    const base = fakeService({ calls: [], uploads: [] });
+    const service: ServiceClientLike = {
+      ...base,
+      storage: {
+        from: () => ({
+          ...base.storage.from("report-photos"),
+          upload: () => {
+            calls++;
+            if (calls === 1) return Promise.reject(new TypeError("fetch failed"));
+            return Promise.resolve({ data: null, error: null });
+          },
+        }),
+      },
+    };
+    const deps: WorkerDeps = {
+      getServiceClient: () => service,
+      resize: fakeResize,
+      sleep: noSleep,
+    };
+
+    const result = await runOnce(deps);
+
+    expect(calls).toBe(2);
+    expect(result).toEqual({ claimed: 1, id: "p-1", sharePath: "share/abc123.jpg" });
   });
 });
 

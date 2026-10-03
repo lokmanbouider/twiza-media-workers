@@ -21,6 +21,19 @@ import sharp from "sharp";
 const BUCKET = "report-photos";
 const SHARE_MAX_DIMENSION = 880;
 const SHARE_QUALITY = 72; // sharp's jpeg quality is 0-100, not 0-1
+const UPLOAD_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 500;
+
+// supabase-js StorageError: `message` can be empty or a placeholder on a
+// network-level failure (the real reason lives in status / originalError).
+export type StorageErrorLike = {
+  message: string;
+  name?: string;
+  status?: number;
+  statusCode?: string | number;
+  originalError?: unknown;
+  cause?: unknown;
+};
 
 export type StorageLike = {
   download(
@@ -30,7 +43,7 @@ export type StorageLike = {
     path: string,
     body: Uint8Array,
     opts: { contentType: string; upsert: boolean },
-  ): Promise<{ data: unknown; error: { message: string } | null }>;
+  ): Promise<{ data: unknown; error: StorageErrorLike | null }>;
 };
 
 export type ServiceClientLike = {
@@ -46,6 +59,8 @@ export type ClaimedJob = { id: string; storage_path: string };
 export type WorkerDeps = {
   getServiceClient: () => ServiceClientLike;
   resize: (bytes: Uint8Array) => Promise<Uint8Array>;
+  /** Injected so tests don't actually wait between upload retries. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 export type RunResult =
@@ -59,6 +74,91 @@ export type RunResult =
 export function sharePathFor(storagePath: string): string {
   const name = storagePath.split("/").pop();
   return `share/${name}`;
+}
+
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** HTTP status of a storage error, whichever field supabase-js filled in. */
+function httpStatus(err: StorageErrorLike): number | undefined {
+  const raw = err.status ?? err.statusCode;
+  const n = typeof raw === "string" ? Number(raw) : raw;
+  return typeof n === "number" && Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * One readable line for an error, never empty: name, message, HTTP status and
+ * the underlying cause. A run once failed with the bare message "<none>", which
+ * made the cause impossible to tell from the logs.
+ */
+export function describeError(err: unknown): string {
+  if (err === null || err === undefined) return "unknown error (no detail)";
+  if (typeof err === "string") return err.trim() || "unknown error (empty string)";
+  if (typeof err !== "object") return String(err);
+
+  const e = err as StorageErrorLike;
+  const parts: string[] = [];
+  const message = typeof e.message === "string" ? e.message.trim() : "";
+  if (e.name && e.name !== "Error") parts.push(e.name);
+  if (message && message !== "<none>") parts.push(message);
+  const status = httpStatus(e);
+  if (status !== undefined) parts.push(`HTTP ${status}`);
+  const inner = e.originalError ?? e.cause;
+  if (inner && inner !== err) parts.push(`cause: ${describeError(inner)}`);
+  if (parts.length === 0) {
+    let dump = "";
+    try {
+      const { message: _ignored, ...rest } = err as Record<string, unknown>;
+      dump = JSON.stringify(rest);
+    } catch {
+      // circular — fall through
+    }
+    parts.push(
+      dump && dump !== "{}" ? dump : `${message ? `"${message}" — ` : ""}no detail from the Storage client`,
+    );
+  }
+  return parts.join(" — ");
+}
+
+/**
+ * A 4xx (other than 408/429) is a definitive answer — bad path, auth, size —
+ * and retrying it only burns time. No status at all means a network-level
+ * failure, which is exactly what a retry is for.
+ */
+export function isRetryableUploadError(err: StorageErrorLike): boolean {
+  const status = httpStatus(err);
+  if (status === undefined) return true;
+  return status >= 500 || status === 408 || status === 429;
+}
+
+/** Upload is `upsert: true`, so replaying it is idempotent. */
+async function uploadWithRetry(
+  storage: StorageLike,
+  path: string,
+  body: Uint8Array,
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt++) {
+    let error: StorageErrorLike | null;
+    try {
+      ({ error } = await storage.upload(path, body, {
+        contentType: "image/jpeg",
+        upsert: true,
+      }));
+    } catch (thrown) {
+      // supabase-js normally returns errors, but a fetch failure can still throw.
+      error = thrown as StorageErrorLike;
+    }
+    if (!error) return;
+
+    failures.push(`#${attempt}: ${describeError(error)}`);
+    if (!isRetryableUploadError(error) || attempt === UPLOAD_ATTEMPTS) break;
+    await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+  }
+  throw new Error(
+    `upload ${path} failed after ${failures.length} attempt(s) — ${failures.join(" | ")}`,
+  );
 }
 
 /** Processes at most one job. Returns what happened. Never throws. */
@@ -91,10 +191,12 @@ export async function runOnce(deps: WorkerDeps): Promise<RunResult> {
     const resized = await deps.resize(bytes);
 
     const sharePath = sharePathFor(job.storage_path);
-    const { error: uploadError } = await service.storage
-      .from(BUCKET)
-      .upload(sharePath, resized, { contentType: "image/jpeg", upsert: true });
-    if (uploadError) throw new Error(`upload ${sharePath}: ${uploadError.message}`);
+    await uploadWithRetry(
+      service.storage.from(BUCKET),
+      sharePath,
+      resized,
+      deps.sleep ?? defaultSleep,
+    );
 
     const { error: completeError } = await service.rpc("complete_share_image_job", {
       p_id: id,
@@ -104,7 +206,7 @@ export async function runOnce(deps: WorkerDeps): Promise<RunResult> {
 
     return { claimed: 1, id, sharePath };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = err instanceof Error ? err.message : describeError(err);
     if (id) {
       try {
         await service.rpc("complete_share_image_job", {
