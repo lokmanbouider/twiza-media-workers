@@ -91,18 +91,31 @@ const THREE_CARDS: RenderedCard[] = [
 
 function makeDeps(
   service: ServiceClientLike,
-  render: (d: CardData) => Promise<RenderedCard[]> = () => Promise.resolve(THREE_CARDS),
+  render: WorkerDeps["render"] = () => Promise.resolve(THREE_CARDS),
 ): WorkerDeps {
   return { getServiceClient: () => service, render };
 }
 
-const PAIR: PairRow = {
-  report_id: "r-1",
-  before_storage_path: "before/r-1.jpg",
-  before_thumbnail_path: "before/thumb/r-1.jpg",
-  after_storage_path: "after/r-1.jpg",
-  after_thumbnail_path: "after/thumb/r-1.jpg",
-};
+function pairFor(id: string): PairRow {
+  return {
+    report_id: id,
+    before_storage_path: `before/${id}.jpg`,
+    before_thumbnail_path: `before/thumb/${id}.jpg`,
+    after_storage_path: `after/${id}.jpg`,
+    after_thumbnail_path: `after/thumb/${id}.jpg`,
+  };
+}
+
+function objectsFor(id: string): Record<string, number> {
+  return {
+    [`before/${id}.jpg`]: 40_000,
+    [`after/${id}.jpg`]: 42_000,
+    [`before/thumb/${id}.jpg`]: 8_000,
+    [`after/thumb/${id}.jpg`]: 8_400,
+  };
+}
+
+const PAIR: PairRow = pairFor("r-1");
 
 describe("runOnce", () => {
   it("no due job -> claimed 0", async () => {
@@ -117,8 +130,9 @@ describe("runOnce", () => {
     const calls: Calls = [];
     const uploads: { path: string; bytes: number }[] = [];
     let rendered: CardData | undefined;
+    // One pair: the hero alone. Per-point visuals have their own tests below.
     const service = fakeService({
-      pairs: [PAIR, { ...PAIR, report_id: "r-2" }],
+      pairs: [PAIR],
       calls,
       uploads,
     });
@@ -230,6 +244,98 @@ describe("runOnce", () => {
     expect("error" in res && res.error).toContain("chromium boom");
     const complete = calls.find((c) => c.fn === "complete_share_card_job");
     expect(String(complete?.params?.p_error)).toContain("chromium boom");
+  });
+
+  it("renders one 9:16 per other cleaned point, under its own report_id", async () => {
+    const calls: Calls = [];
+    const uploads: { path: string; bytes: number }[] = [];
+    const asked: (readonly string[] | undefined)[] = [];
+    const service = fakeService({
+      pairs: [PAIR, pairFor("r-2"), pairFor("r-3")],
+      objects: { ...objectsFor("r-1"), ...objectsFor("r-2"), ...objectsFor("r-3") },
+      calls,
+      uploads,
+    });
+    const res = await runOnce(
+      makeDeps(service, (_d, formats) => {
+        asked.push(formats);
+        return Promise.resolve(formats ? [THREE_CARDS[0]!] : THREE_CARDS);
+      }),
+    );
+
+    expect("formats" in res).toBe(true);
+    expect(uploads.map((u) => u.path)).toEqual([
+      "e-1/9x16.jpg",
+      "e-1/1x1.jpg",
+      "e-1/1.91x1.jpg",
+      "e-1/r-2/9x16.jpg",
+      "e-1/r-3/9x16.jpg",
+    ]);
+    // The hero pair gets no per-point visual: share_card_for already falls
+    // back to the hero for a point that has none.
+    expect(asked).toEqual([undefined, ["9x16"], ["9x16"]]);
+    const rows = calls.find((c) => c.fn === "complete_share_card_job")?.params
+      ?.p_cards as Record<string, unknown>[];
+    expect(rows.filter((r) => r.report_id)).toEqual([
+      {
+        report_id: "r-2",
+        format: "9x16",
+        storage_path: "e-1/r-2/9x16.jpg",
+        width: 1080,
+        height: 1920,
+        bytes: 1234,
+      },
+      {
+        report_id: "r-3",
+        format: "9x16",
+        storage_path: "e-1/r-3/9x16.jpg",
+        width: 1080,
+        height: 1920,
+        bytes: 1234,
+      },
+    ]);
+  });
+
+  it("skips a point whose photo is missing without failing the job", async () => {
+    const calls: Calls = [];
+    const uploads: { path: string; bytes: number }[] = [];
+    const service = fakeService({
+      pairs: [PAIR, pairFor("r-2"), pairFor("r-3")],
+      // r-2 has no stored object at all.
+      objects: { ...objectsFor("r-1"), ...objectsFor("r-3") },
+      calls,
+      uploads,
+    });
+    const res = await runOnce(
+      makeDeps(service, (_d, formats) =>
+        Promise.resolve(formats ? [THREE_CARDS[0]!] : THREE_CARDS)),
+    );
+
+    expect(res).toMatchObject({ claimed: 1, eventId: "e-1" });
+    expect(uploads.map((u) => u.path)).toContain("e-1/r-3/9x16.jpg");
+    expect(uploads.map((u) => u.path)).not.toContain("e-1/r-2/9x16.jpg");
+    const complete = calls.find((c) => c.fn === "complete_share_card_job");
+    expect(complete?.params?.p_error).toBeUndefined();
+  });
+
+  it("caps per-point visuals so one big action cannot hold the runner", async () => {
+    const calls: Calls = [];
+    const uploads: { path: string; bytes: number }[] = [];
+    const ids = Array.from({ length: 40 }, (_, i) => `r-${i + 1}`);
+    const service = fakeService({
+      pairs: ids.map(pairFor),
+      objects: Object.assign({}, ...ids.map(objectsFor)),
+      calls,
+      uploads,
+    });
+    await runOnce(
+      makeDeps(service, (_d, formats) =>
+        Promise.resolve(formats ? [THREE_CARDS[0]!] : THREE_CARDS)),
+    );
+
+    const perPoint = uploads.filter((u) => u.path.includes("/r-"));
+    expect(perPoint).toHaveLength(30);
+    expect(perPoint.at(-1)?.path).toBe("e-1/r-31/9x16.jpg");
   });
 });
 

@@ -14,6 +14,7 @@ import type { CardData } from "./templates/shared.js";
 import {
   encodeJpegReal,
   fontFaceCssReal,
+  type Format,
   makeChromiumScreenshot,
   type RenderedCard,
   renderShareCards,
@@ -64,8 +65,22 @@ export type ContextRow = {
 
 export type WorkerDeps = {
   getServiceClient: () => ServiceClientLike;
-  render: (data: CardData) => Promise<RenderedCard[]>;
+  render: (data: CardData, formats?: readonly Format[]) => Promise<RenderedCard[]>;
 };
+
+/**
+ * Per-point visuals: 9:16 only. The app shares that format; producing all
+ * three per point would triple storage and egress for little gain, and the
+ * app fills the square and link formats from the action's hero card.
+ */
+const PER_POINT_FORMATS = ["9x16"] as const;
+
+/**
+ * Cap on per-point visuals for one action. An action targeting dozens of
+ * points would otherwise hold the runner for a long time; the points past
+ * the cap simply fall back to the hero visual, as before.
+ */
+const MAX_PER_POINT_CARDS = 30;
 
 export type RunResult =
   | { claimed: 0 }
@@ -156,19 +171,44 @@ export async function runOnce(deps: WorkerDeps): Promise<RunResult> {
 
     const cards = await deps.render(data);
     const rows: Record<string, unknown>[] = [];
-    for (const card of cards) {
-      const path = `${eventId}/${card.format}.jpg`;
+    const store = async (card: RenderedCard, reportId?: string) => {
+      const path = reportId
+        ? `${eventId}/${reportId}/${card.format}.jpg`
+        : `${eventId}/${card.format}.jpg`;
       const { error: upErr } = await service.storage
         .from(BUCKET_CARDS)
         .upload(path, card.jpeg, { contentType: "image/jpeg", upsert: true });
       if (upErr) throw new Error(`upload ${card.format}: ${upErr.message}`);
       rows.push({
+        ...(reportId ? { report_id: reportId } : {}),
         format: card.format,
         storage_path: path,
         width: card.width,
         height: card.height,
         bytes: card.jpeg.byteLength,
       });
+    };
+    for (const card of cards) await store(card);
+
+    // One visual per other cleaned point, so sharing from a feed row shows
+    // that point's own before/after instead of the hero's. The hero pair
+    // needs none: share_card_for falls back to the hero when a point has no
+    // visual of its own. A point that fails (missing photo, upload) is
+    // skipped rather than failing the job — it keeps the hero fallback.
+    for (const p of pairs.slice(1, 1 + MAX_PER_POINT_CARDS)) {
+      try {
+        const [before, after] = await Promise.all([
+          toDataUri(reports, p.before_storage_path ?? p.before_thumbnail_path),
+          toDataUri(reports, p.after_storage_path ?? p.after_thumbnail_path),
+        ]);
+        const pointCards = await deps.render(
+          { ...data, beforeDataUri: before, afterDataUri: after },
+          PER_POINT_FORMATS,
+        );
+        for (const card of pointCards) await store(card, p.report_id);
+      } catch {
+        // best-effort — this point keeps the action's hero visual
+      }
     }
 
     await service.rpc("complete_share_card_job", {
@@ -232,12 +272,16 @@ export async function makeRealDeps(): Promise<{
   const { screenshot, close } = await makeChromiumScreenshot();
   const deps: WorkerDeps = {
     getServiceClient: realServiceClient,
-    render: (data) =>
-      renderShareCards(data, {
-        screenshot,
-        encodeJpeg: encodeJpegReal,
-        fontFaceCss: fontFaceCssReal,
-      }),
+    render: (data, formats) =>
+      renderShareCards(
+        data,
+        {
+          screenshot,
+          encodeJpeg: encodeJpegReal,
+          fontFaceCss: fontFaceCssReal,
+        },
+        formats,
+      ),
   };
   return { deps, close };
 }
