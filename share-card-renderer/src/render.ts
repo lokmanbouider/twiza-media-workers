@@ -52,14 +52,20 @@ async function toJpegUnderBudget(
   return out;
 }
 
-/** Renders all three formats from the same data, one pass, JPEG < 500 KB each. */
+/**
+ * Renders the same data into the given formats (all three by default), one
+ * pass, JPEG < 500 KB each. The per-point visuals ask for 9:16 only — the
+ * format people actually post — to keep storage and egress down.
+ */
 export async function renderShareCards(
   data: CardData,
   deps: RenderDeps,
+  formats?: readonly Format[],
 ): Promise<RenderedCard[]> {
   const fontFaceCss = await deps.fontFaceCss();
   const out: RenderedCard[] = [];
-  for (const { spec, build } of SPECS) {
+  const wanted = SPECS.filter(({ spec }) => !formats || formats.includes(spec.format));
+  for (const { spec, build } of wanted) {
     const html = build(data, fontFaceCss);
     const png = await deps.screenshot(html, spec.width, spec.height);
     const jpeg = await toJpegUnderBudget(png, deps.encodeJpeg);
