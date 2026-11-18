@@ -37,7 +37,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: share-image-backfill/package-lock.json
-      - run: npm ci
+      # --omit=dev : ce job détient la clé service_role et n'exécute que tsx ;
+      # vitest, vite et typescript (et leurs alertes npm audit) restent à la CI.
+      - run: npm ci --omit=dev
       - name: Drain the queue
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
