@@ -47,8 +47,24 @@ jobs:
           ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       # Poids CLIP q8 (~90 Mo) téléchargés depuis le HF Hub au 1er run puis
       # servis depuis le cache — régime permanent sans téléchargement.
-      - name: Cache the CLIP model weights
-        uses: actions/cache@v4
+      # src/embed.ts fixe env.cacheDir sous ~/.cache/huggingface : par défaut
+      # Transformers.js écrit dans node_modules et ce cache n'a jamais rien
+      # enregistré. Restauration et sauvegarde séparées, autour d'un `warm` qui
+      # ne fait que télécharger le modèle : un simple actions/cache n'enregistre
+      # qu'en fin de job réussi, et seulement si une photo a chargé le modèle
+      # (file vide = rien à enregistrer).
+      - name: Restore the CLIP model weights
+        id: clip-weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-Xenova-clip-vit-base-patch32-q8
+      - name: Download the CLIP model weights
+        if: steps.clip-weights.outputs.cache-hit != 'true'
+        run: npm run warm
+      - name: Save the CLIP model weights
+        if: steps.clip-weights.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
           path: ~/.cache/huggingface
           key: hf-Xenova-clip-vit-base-patch32-q8

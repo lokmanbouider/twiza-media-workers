@@ -7,6 +7,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "drain": "tsx src/drain.ts",
+    "warm": "tsx src/warm.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

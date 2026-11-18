@@ -9,12 +9,28 @@
 // convention, and it lets pgvector's <->, <#> and <=> operators be used
 // interchangeably later.
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   AutoProcessor,
   CLIPVisionModelWithProjection,
+  env,
   type Processor,
   RawImage,
 } from "@huggingface/transformers";
+
+// Where the downloaded weights land. Transformers.js ignores HF_HOME and, left
+// alone, writes them inside its own package (node_modules/@huggingface/
+// transformers/.cache/), which the workflow's actions/cache never saw — every
+// run re-downloaded the ~90MB model. Pinned under ~/.cache/huggingface, the
+// path photo-embed.yml caches.
+export const MODEL_CACHE_DIR = join(
+  homedir(),
+  ".cache",
+  "huggingface",
+  "transformers.js",
+);
+env.cacheDir = MODEL_CACHE_DIR;
 
 export const MODEL_ID = "Xenova/clip-vit-base-patch32";
 export const MODEL_DTYPE = "q8";
@@ -45,6 +61,16 @@ function loadPipeline(): Promise<{ processor: Processor; model: VisionModel }> {
     })();
   }
   return pipelinePromise;
+}
+
+/**
+ * Loads the processor and the model, downloading the weights into
+ * MODEL_CACHE_DIR if they are not there yet. Run on its own by the workflow
+ * when the cache misses, so the weights get cached even if the queue is empty
+ * or the drain fails.
+ */
+export async function warmUp(): Promise<void> {
+  await loadPipeline();
 }
 
 function l2normalize(vec: number[]): number[] {
