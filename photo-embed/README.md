@@ -59,10 +59,14 @@ The DB side reuses the existing vault secrets `github_repo` /
 ### Model weights
 
 Transformers.js downloads `Xenova/clip-vit-base-patch32` (q8, ~90 MB) from the
-Hugging Face Hub on first run. The workflow caches `~/.cache/huggingface`, so
-steady-state runs do no download. To pin a different model or dtype, edit
-`MODEL_ID` / `MODEL_DTYPE` in `src/embed.ts` and bump the cache key in the
-workflow; `MODEL_TAG` is written to `photos.embed_model` so a later
+Hugging Face Hub on first run, into `~/.cache/huggingface/transformers.js`
+(`MODEL_CACHE_DIR` in `src/embed.ts` — Transformers.js ignores `HF_HOME` and
+would otherwise write inside `node_modules`). The workflow caches
+`~/.cache/huggingface`: on a miss it runs `npm run warm` (download only, no
+secrets) and saves the cache straight away, before the drain, so steady-state
+runs do no download whatever the queue holds. To pin a different model or
+dtype, edit `MODEL_ID` / `MODEL_DTYPE` in `src/embed.ts` and bump the cache key
+(both occurrences) in the workflow; `MODEL_TAG` is written to `photos.embed_model` so a later
 `update … set embedding = null where embed_model <> '<new tag>'` re-enqueues
 the affected rows.
 
