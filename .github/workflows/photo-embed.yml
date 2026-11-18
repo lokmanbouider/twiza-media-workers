@@ -37,7 +37,14 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: photo-embed/package-lock.json
+      # onnxruntime-node télécharge à l'installation, sur Linux x64, une version
+      # GPU (CUDA) hébergée sur github.com/microsoft/onnxruntime : 404 depuis le
+      # 2026-11-18, npm ci échouait avant même de lire la file. Le runner n'a pas
+      # de GPU et le paquet npm embarque déjà la version CPU : on saute ce
+      # téléchargement, qui n'a jamais servi.
       - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       # Poids CLIP q8 (~90 Mo) téléchargés depuis le HF Hub au 1er run puis
       # servis depuis le cache — régime permanent sans téléchargement.
       - name: Cache the CLIP model weights
