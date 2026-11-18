@@ -16,9 +16,12 @@
     "@supabase/supabase-js": "^2.45.0",
     "tsx": "^4.19.0"
   },
+  "overrides": {
+    "sharp": "^0.35.5"
+  },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.12"
   }
 }

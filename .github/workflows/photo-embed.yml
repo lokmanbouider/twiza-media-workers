@@ -42,7 +42,9 @@ jobs:
       # 2026-11-18, npm ci échouait avant même de lire la file. Le runner n'a pas
       # de GPU et le paquet npm embarque déjà la version CPU : on saute ce
       # téléchargement, qui n'a jamais servi.
-      - run: npm ci
+      # --omit=dev : ce job détient la clé service_role et n'exécute que tsx ;
+      # vitest, vite et typescript (et leurs alertes npm audit) restent à la CI.
+      - run: npm ci --omit=dev
         env:
           ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       # Poids CLIP q8 (~90 Mo) téléchargés depuis le HF Hub au 1er run puis
