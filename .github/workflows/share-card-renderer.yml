@@ -34,7 +34,11 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: share-card-renderer/package-lock.json
-      - run: npm ci
+      # --omit=dev : ce job détient la clé service_role et n'exécute que tsx ;
+      # vitest, vite et typescript (et leurs alertes npm audit) restent à la CI.
+      # playwright est une dépendance de production : la CLI de l'étape
+      # suivante reste installée.
+      - run: npm ci --omit=dev
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Drain the queue
